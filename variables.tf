@@ -1,25 +1,35 @@
 variable "host_project_id" {
   type        = string
-  description = "GCP Project ID for network infrastructure"
+  description = "The GCP project ID designated as the Shared VPC host project."
 }
 
 variable "region" {
   type        = string
-  description = "Default deployment region"
   default     = "us-central1"
+  description = "The primary region for deploying regional resources and subnets."
+}
+
+variable "service_project_ids" {
+  type        = map(string)
+  description = "Map of service project IDs keyed by environment and workload type (e.g., dev-gce, dev-gke, dev-gemini)."
+}
+
+variable "service_project_numbers" {
+  type        = map(string)
+  description = "Map of service project numbers keyed by environment and workload type, required for IAM robot service account bindings."
 }
 
 variable "palo_alto_instance_group_self_link" {
   type        = string
-  description = "Self-link of the instance group containing Palo Alto VMs"
+  description = "The self-link of the Palo Alto Networks managed instance group or backend instance group."
 }
 
 variable "pa_vm1_self_link" {
   type        = string
-  description = "Compute instance self-link for PA-VM-1"
+  description = "The self-link of Palo Alto firewall VM 1 for the router appliance center spoke."
 }
 
 variable "pa_vm2_self_link" {
   type        = string
-  description = "Compute instance self-link for PA-VM-2"
+  description = "The self-link of Palo Alto firewall VM 2 for the router appliance center spoke."
 }
