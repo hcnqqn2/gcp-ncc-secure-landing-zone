@@ -16,32 +16,46 @@ provider "google" {
 locals {
   environments = {
     prod = {
-      cidr      = "10.10.1.0/24"
-      pod_cidr  = "10.100.0.0/18"
-      svc_cidr  = "10.101.0.0/20"
-      psc_cidr  = "10.10.254.0/24"
+      cidr     = "10.10.1.0/24"
+      pod_cidr = "10.100.0.0/18"
+      svc_cidr = "10.101.0.0/20"
+      psc_cidr = "10.10.254.0/24"
     },
     dev = {
-      cidr      = "10.20.1.0/24"
-      pod_cidr  = "10.200.0.0/18"
-      svc_cidr  = "10.201.0.0/20"
-      psc_cidr  = "10.20.254.0/24"
+      cidr     = "10.20.1.0/24"
+      pod_cidr = "10.200.0.0/18"
+      svc_cidr = "10.201.0.0/20"
+      psc_cidr = "10.20.254.0/24"
     },
     test = {
-      cidr      = "10.30.1.0/24"
-      pod_cidr  = "10.210.0.0/18"
-      svc_cidr  = "10.211.0.0/20"
-      psc_cidr  = "10.30.254.0/24"
+      cidr     = "10.30.1.0/24"
+      pod_cidr = "10.210.0.0/18"
+      svc_cidr = "10.211.0.0/20"
+      psc_cidr = "10.30.254.0/24"
+    }
+  }
+
+  # Maps each environment to its 3 service projects: GCE, GKE, and Gemini Notebooks
+  service_project_mappings = {
+    for pair in setproduct(keys(local.environments), ["gce", "gke", "gemini"]) :
+    "${pair[0]}-${pair[1]}" => {
+      env          = pair[0]
+      service_type = pair[1]
     }
   }
 }
 
-# 1. NCC HUB 
+# --------------------------------------------------------------------------------
+# 1. NCC HUB
+# --------------------------------------------------------------------------------
 resource "google_network_connectivity_hub" "enterprise_hub" {
   name        = "enterprise-star-hub"
   description = "Global NCC Hub using Star Topology for inspection"
 }
+
+# --------------------------------------------------------------------------------
 # 2. HUB VPC (EDGE SPOKE - HYBRID CONNECTIVITY)
+# --------------------------------------------------------------------------------
 resource "google_compute_network" "hub_vpc" {
   name                    = "hub-hybrid-vpc"
   auto_create_subnetworks = false
@@ -75,7 +89,9 @@ resource "google_network_connectivity_spoke" "hub_vpc_spoke" {
   }
 }
 
+# --------------------------------------------------------------------------------
 # 3. SECURITY VPC (CENTER SPOKE - PALO ALTO INSPECTION)
+# --------------------------------------------------------------------------------
 resource "google_compute_network" "security_vpc" {
   name                    = "security-inspection-vpc"
   auto_create_subnetworks = false
@@ -162,6 +178,7 @@ resource "google_compute_router_peer" "peer_pa2" {
   peer_asn        = 65002
   interface       = google_compute_router_interface.to_pa2.name
 }
+
 resource "google_network_connectivity_spoke" "security_center_spoke" {
   name     = "security-router-appliance-center-spoke"
   hub      = google_network_connectivity_hub.enterprise_hub.id
@@ -181,7 +198,9 @@ resource "google_network_connectivity_spoke" "security_center_spoke" {
   }
 }
 
-# 4. WORKLOAD SHARED VPCs (PROD, DEV, TEST) WITH SERVICE STACK CONFIGURATIONS
+# --------------------------------------------------------------------------------
+# 4. WORKLOAD SHARED VPCs (PROD, DEV, TEST) & SPOKES
+# --------------------------------------------------------------------------------
 resource "google_compute_network" "shared_vpcs" {
   for_each                = local.environments
   name                    = "shared-vpc-${each.key}"
@@ -191,19 +210,19 @@ resource "google_compute_network" "shared_vpcs" {
 
 resource "google_compute_subnetwork" "shared_subnets" {
   for_each                 = local.environments
-  name                     = "subnet-${each.key}-us-central1"
+  name                     = "subnet-${each.key}-${var.region}"
   ip_cidr_range            = each.value.cidr
   region                   = var.region
   network                  = google_compute_network.shared_vpcs[each.key].id
   private_ip_google_access = true
 
   secondary_ip_range {
-    range_name    = "gke-pods-${each.key}"
+    range_name   = "gke-pods-${each.key}"
     ip_cidr_range = each.value.pod_cidr
   }
 
   secondary_ip_range {
-    range_name    = "gke-services-${each.key}"
+    range_name   = "gke-services-${each.key}"
     ip_cidr_range = each.value.svc_cidr
   }
 }
@@ -220,7 +239,9 @@ resource "google_network_connectivity_spoke" "edge_spokes" {
   }
 }
 
+# --------------------------------------------------------------------------------
 # 5. PRIVATE SERVICE CONNECT (PSC) FOR CLOUD SQL ACROSS SPOKES
+# --------------------------------------------------------------------------------
 resource "google_compute_subnetwork" "psc_subnets" {
   for_each      = local.environments
   name          = "subnet-psc-${each.key}"
@@ -228,4 +249,48 @@ resource "google_compute_subnetwork" "psc_subnets" {
   region        = var.region
   network       = google_compute_network.shared_vpcs[each.key].id
   purpose       = "PRIVATE_SERVICE_CONNECT"
+}
+
+# --------------------------------------------------------------------------------
+# 6. SHARED VPC HOST & SERVICE PROJECT BINDINGS
+# --------------------------------------------------------------------------------
+resource "google_compute_shared_vpc_host_project" "host" {
+  project = var.host_project_id
+}
+
+resource "google_compute_shared_vpc_service_project" "service_projects" {
+  for_each        = local.service_project_mappings
+  host_project    = google_compute_shared_vpc_host_project.host.project
+  service_project = var.service_project_ids[each.key]
+}
+
+# --------------------------------------------------------------------------------
+# 7. SUBNET IAM BINDINGS FOR WORKLOAD SERVICE ACCOUNTS (GCE, GKE, GEMINI)
+# --------------------------------------------------------------------------------
+
+# Grant GKE Service Agent Network User role on the Shared VPC Subnet
+resource "google_compute_subnetwork_iam_member" "gke_network_user" {
+  for_each   = local.environments
+  subnetwork = google_compute_subnetwork.shared_subnets[each.key].name
+  region     = var.region
+  role       = "roles/compute.networkUser"
+  member     = "serviceAccount:service-${var.service_project_numbers["${each.key}-gke"]}@container-engine-robot.iam.gserviceaccount.com"
+}
+
+# Grant GCE / Compute Service Account Network User role on the Shared VPC Subnet
+resource "google_compute_subnetwork_iam_member" "gce_network_user" {
+  for_each   = local.environments
+  subnetwork = google_compute_subnetwork.shared_subnets[each.key].name
+  region     = var.region
+  role       = "roles/compute.networkUser"
+  member     = "serviceAccount:${var.service_project_numbers["${each.key}-gce"]}@cloudservices.gserviceaccount.com"
+}
+
+# Grant Gemini Enterprise Notebook / Vertex AI Service Agent Network User role on the Shared VPC Subnet
+resource "google_compute_subnetwork_iam_member" "gemini_network_user" {
+  for_each   = local.environments
+  subnetwork = google_compute_subnetwork.shared_subnets[each.key].name
+  region     = var.region
+  role       = "roles/compute.networkUser"
+  member     = "serviceAccount:service-${var.service_project_numbers["${each.key}-gemini"]}@gcp-sa-aiplatform.iam.gserviceaccount.com"
 }
